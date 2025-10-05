@@ -1,0 +1,364 @@
+Option Explicit
+
+
+' --------------------------------------------------------------------
+' CONSTANTES Y DECLARACIONES GLOBALES
+' --------------------------------------------------------------------
+
+Public Const HojaNombre As String = "Hoja1"
+
+
+Public Const RAM_SIZE As Long = 32
+Public Const RAM_START_ROW As Long = 3      
+
+Public Const PAGE_SIZE As Long = 4          
+Public Const NUM_PAGES As Long = 8          
+Public Const NUM_FRAMES As Long = 8         
+
+Public Const CACHE_LINE_COUNT As Long = 8
+Public Const CACHE_SETS As Long = 4
+Public Const CACHE_WAYS As Long = 2
+Public Const CACHE_START_ROW As Long = 3   
+
+
+' --- CONSTANTES DE COLUMNA ---
+
+Public Const COL_RAM_DIR As String = "O"   ' Columna 15
+Public Const COL_RAM_DATA As String = "P"  ' Columna 16
+
+Public Const COL_CACHE_TAG As String = "S" ' Columna 19
+Public Const COL_CACHE_DATA As String = "T"  ' Columna 20
+Public Const COL_CACHE_LRU As String = "U" ' Columna 21
+
+Public Const COL_PAGE_NUM As String = "W"  ' Columna 23
+Public Const COL_PAGE_FRAME As String = "X"  ' Columna 24
+Public Const COL_PAGE_VALID As String = "Y"  ' Columna 25
+
+Public Const COL_IO_PORT As String = "X"   ' Usaremos W para I/O (Puertos 1 y 2 en filas 3 y 4)
+Public Const COL_SIGNAL_CACHE As String = "X" ' Señal Latencia Caché (X6)
+Public Const COL_SIGNAL_MMU As String = "Y"  ' Señal Page Fault (Y7)
+
+Public Const COL_MV_SWAP_DATA As String = "AC" ' Columna 29 (Swap Data)
+
+
+Public Cache_Tag(1 To CACHE_LINE_COUNT) As Long
+Public Cache_Data(1 To CACHE_LINE_COUNT) As Long
+Public Cache_State_LRU(1 To CACHE_LINE_COUNT) As Long
+
+Public PageTable_Frame(0 To NUM_PAGES - 1) As Long
+Public PageTable_ValidBit(0 To NUM_PAGES - 1) As Boolean
+Public PageTable_LRU(0 To NUM_PAGES - 1) As Long
+
+
+' --------------------------------------------------------------------
+' INICIALIZACIÓN Y RESET
+' --------------------------------------------------------------------
+
+Public Sub Reset_Simulador()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    Dim i As Integer
+    
+    For i = 0 To RAM_SIZE - 1
+        Dim Etiqueta As String
+        Select Case i
+            Case 0: Etiqueta = "VAR_A"
+            Case 1: Etiqueta = "VAR_B"
+            Case 2: Etiqueta = "RESULT"
+            Case 3: Etiqueta = "TEMP"
+            Case Else: Etiqueta = "MEM_" & Format(i, "00")
+        End Select
+        ws.Cells(i + RAM_START_ROW, "N").Value = Etiqueta 
+        
+        ws.Cells(i + RAM_START_ROW, COL_RAM_DIR).Value = i 
+        ws.Cells(i + RAM_START_ROW, COL_RAM_DATA).Value = 0  
+    Next i
+    
+    For i = 0 To NUM_PAGES * PAGE_SIZE - 1 
+        ws.Cells(i + 3, COL_MV_SWAP_DATA).Value = (i + 1) * 100 
+    Next i
+    
+    For i = 0 To NUM_PAGES - 1
+        PageTable_Frame(i) = -1
+        PageTable_ValidBit(i) = False
+        PageTable_LRU(i) = 0
+        ws.Cells(i + 7, COL_PAGE_NUM).Value = i      
+        ws.Cells(i + 7, COL_PAGE_FRAME).Value = "N/A"
+        ws.Cells(i + 7, COL_PAGE_VALID).Value = "Falso"
+    Next i
+
+    For i = 1 To CACHE_LINE_COUNT
+        Cache_Tag(i) = -1
+        Cache_Data(i) = 0
+        Cache_State_LRU(i) = 0
+        ws.Cells(i + CACHE_START_ROW - 1, "R").Value = i 
+        ws.Cells(i + CACHE_START_ROW - 1, COL_CACHE_TAG).Value = Cache_Tag(i)
+        ws.Cells(i + CACHE_START_ROW - 1, COL_CACHE_DATA).Value = Cache_Data(i)
+        ws.Cells(i + CACHE_START_ROW - 1, COL_CACHE_LRU).Value = "0 (MRU)"
+    Next i
+    
+    ws.Cells(3, COL_IO_PORT).Value = 0 ' IN Port 1 (W3)
+    ws.Cells(4, COL_IO_PORT).Value = 0 ' OUT Port 2 (W4)
+    
+    ws.Cells(5, COL_SIGNAL_CACHE).Value = "" ' Señal Latencia Caché (X5)
+    ws.Cells(6, COL_SIGNAL_MMU).Value = ""   ' Señal Page Fault (Y6)
+
+End Sub
+
+' --------------------------------------------------------------------
+' FUNCIÓN PRINCIPAL DE LECTURA (API para Leandro)
+' --------------------------------------------------------------------
+
+Public Function Leer_Memoria(ByVal DireccionVirtual As Long) As Long
+    
+    Dim PageNum As Long, Offset As Long, FrameNum As Long, DireccionFisica As Long
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    PageNum = Int(DireccionVirtual / PAGE_SIZE)
+    Offset = DireccionVirtual Mod PAGE_SIZE
+    
+    If PageNum < 0 Or PageNum >= NUM_PAGES Then
+        ws.Cells(7, COL_SIGNAL_MMU).Value = "Error Dir Virtual Fuera de Rango"
+        Leer_Memoria = 0
+        Exit Function
+    End If
+    
+    If PageTable_ValidBit(PageNum) Then 
+        
+        ws.Cells(7, COL_SIGNAL_MMU).Value = "Page Hit"
+        FrameNum = PageTable_Frame(PageNum)
+        Call ActualizarLRU_Paginacion(PageNum)
+        
+    Else 
+        
+        ws.Cells(7, COL_SIGNAL_MMU).Value = "Page FAULT (Loading Disk...)"
+        
+        FrameNum = Reemplazar_Marco_LRU_Paginacion()
+        
+        Call Cargar_Pagina_desde_Disco(PageNum, FrameNum)
+        
+        Call ActualizarLRU_Paginacion(PageNum)
+        
+        ws.Cells(7, COL_SIGNAL_MMU).Value = "Page Hit (LOADED)"
+    End If
+    
+    DireccionFisica = FrameNum * PAGE_SIZE + Offset
+    
+    Leer_Memoria = Buscar_en_Cache_Fisica(DireccionFisica)
+End Function
+
+
+Public Sub Escribir_Memoria(ByVal DireccionVirtual As Long, ByVal Valor As Long)
+    
+    Dim PageNum As Long, Offset As Long, DireccionFisica As Long
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    PageNum = Int(DireccionVirtual / PAGE_SIZE)
+    
+    If Not PageTable_ValidBit(PageNum) Then
+        ws.Cells(7, COL_SIGNAL_MMU).Value = "Error: Escribiendo en Página No Cargada"
+        Exit Sub
+    End If
+    
+    Offset = DireccionVirtual Mod PAGE_SIZE
+    DireccionFisica = PageTable_Frame(PageNum) * PAGE_SIZE + Offset
+
+    ws.Cells(DireccionFisica + RAM_START_ROW, COL_RAM_DATA).Value = Valor
+    
+    Dim Tag As Long, SetIndex As Long, BaseLine As Long, Way As Long
+    SetIndex = DireccionFisica Mod CACHE_SETS
+    Tag = Int(DireccionFisica / CACHE_SETS)
+    BaseLine = SetIndex * CACHE_WAYS + 1
+    
+    For Way = 0 To CACHE_WAYS - 1
+        Dim CurrentLine As Long
+        CurrentLine = BaseLine + Way
+        
+        If Cache_Tag(CurrentLine) = Tag Then
+            Cache_Data(CurrentLine) = Valor
+            Call ActualizarLRU_Cache(BaseLine, CurrentLine)
+            Call Actualizar_Caché_Visual(CurrentLine)
+            Exit Sub
+        End If
+    Next Way
+End Sub
+
+' --------------------------------------------------------------------
+' ACCESO A CACHÉ (Lógica de RAM y Caché)
+' --------------------------------------------------------------------
+
+Private Function Buscar_en_Cache_Fisica(ByVal DireccionFisica As Long) As Long
+    
+    Dim Tag As Long, SetIndex As Long, BaseLine As Long, Way As Long
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    SetIndex = DireccionFisica Mod CACHE_SETS
+    Tag = Int(DireccionFisica / CACHE_SETS)
+    BaseLine = SetIndex * CACHE_WAYS + 1
+    
+    For Way = 0 To CACHE_WAYS - 1
+        Dim CurrentLine As Long
+        CurrentLine = BaseLine + Way
+        
+        If Cache_Tag(CurrentLine) = Tag And Cache_Tag(CurrentLine) <> -1 Then 
+            Call ActualizarLRU_Cache(BaseLine, CurrentLine)
+            ws.Cells(6, COL_SIGNAL_CACHE).Value = "HIT (1 ciclo)"
+            Buscar_en_Cache_Fisica = Cache_Data(CurrentLine)
+            Exit Function
+        End If
+    Next Way
+
+    Dim ValorRAM As Long
+    ValorRAM = ws.Cells(DireccionFisica + RAM_START_ROW, COL_RAM_DATA).Value
+    
+    Call Reemplazar_LRU_Cache(BaseLine, Tag, ValorRAM)
+    ws.Cells(6, COL_SIGNAL_CACHE).Value = "MISS (10 ciclos)"
+    
+    Buscar_en_Cache_Fisica = ValorRAM
+End Function
+
+Private Sub ActualizarLRU_Cache(ByVal BaseLine As Long, ByVal AccessedLine As Long)
+    Dim OtherLine As Long
+    
+    If AccessedLine = BaseLine Then
+        OtherLine = BaseLine + 1
+    Else
+        OtherLine = BaseLine
+    End If
+    
+    Cache_State_LRU(AccessedLine) = 0
+    Cache_State_LRU(OtherLine) = 1
+    
+    Call Actualizar_Caché_Visual(AccessedLine)
+    Call Actualizar_Caché_Visual(OtherLine)
+End Sub
+
+Private Sub Reemplazar_LRU_Cache(ByVal BaseLine As Long, ByVal Tag As Long, ByVal Valor As Long)
+    
+    Dim LineToReplace As Long
+    
+    If Cache_State_LRU(BaseLine) = 1 Then
+        LineToReplace = BaseLine
+    Else
+        LineToReplace = BaseLine + 1
+    End If
+    
+    Cache_Tag(LineToReplace) = Tag
+    Cache_Data(LineToReplace) = Valor
+    Call ActualizarLRU_Cache(BaseLine, LineToReplace)
+End Sub
+
+Private Sub Actualizar_Caché_Visual(ByVal LineNum As Long)
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    Dim RowOffset As Long
+    RowOffset = CACHE_START_ROW + LineNum - 1
+    
+    ws.Cells(RowOffset, COL_CACHE_TAG).Value = Cache_Tag(LineNum)
+    ws.Cells(RowOffset, COL_CACHE_DATA).Value = Cache_Data(LineNum)
+    
+    If Cache_State_LRU(LineNum) = 0 Then
+        ws.Cells(RowOffset, COL_CACHE_LRU).Value = "0 (MRU)"
+    Else
+        ws.Cells(RowOffset, COL_CACHE_LRU).Value = "1 (LRU)"
+    End If
+End Sub
+
+' --------------------------------------------------------------------
+' LÓGICA DE PAGINACIÓN (MMU)
+' --------------------------------------------------------------------
+
+Private Sub Cargar_Pagina_desde_Disco(ByVal PageNum As Long, ByVal TargetFrame As Long)
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(HojaNombre)
+    
+    ws.Cells(6, COL_SIGNAL_CACHE).Value = "DISK LOAD (200 ciclos)" 
+
+    Dim i As Long
+    For i = 0 To NUM_PAGES - 1
+        If PageTable_Frame(i) = TargetFrame And PageTable_ValidBit(i) Then
+            PageTable_ValidBit(i) = False
+            ws.Cells(i + 6, COL_PAGE_VALID).Value = "Falso"
+            Exit For
+        End If
+    Next i
+
+    For i = 0 To PAGE_SIZE - 1
+        Dim Swap_Row As Long: Swap_Row = (PageNum * PAGE_SIZE) + 3 + i
+        Dim RAM_Row As Long: RAM_Row = (TargetFrame * PAGE_SIZE) + RAM_START_ROW + i
+        
+        ws.Cells(RAM_Row, COL_RAM_DATA).Value = ws.Cells(Swap_Row, COL_MV_SWAP_DATA).Value
+    Next i
+
+    PageTable_Frame(PageNum) = TargetFrame
+    PageTable_ValidBit(PageNum) = True
+    ws.Cells(PageNum + 6, COL_PAGE_FRAME).Value = TargetFrame
+    ws.Cells(PageNum + 6, COL_PAGE_VALID).Value = "Verdadero"
+End Sub
+
+Private Function Reemplazar_Marco_LRU_Paginacion() As Long
+    
+    Dim i As Long, MaxLRU As Long
+    MaxLRU = -1
+    Reemplazar_Marco_LRU_Paginacion = -1
+    
+    For i = 0 To NUM_PAGES - 1
+        If Not PageTable_ValidBit(i) Then
+            ' Si encontramos una página que no está cargada, usamos ese marco
+            Reemplazar_Marco_LRU_Paginacion = i 
+            Exit Function
+        End If
+    Next i
+    
+    For i = 0 To NUM_PAGES - 1
+        If PageTable_ValidBit(i) Then
+            If PageTable_LRU(i) > MaxLRU Then
+                MaxLRU = PageTable_LRU(i)
+                Reemplazar_Marco_LRU_Paginacion = PageTable_Frame(i)
+            End If
+        End If
+    Next i
+    
+End Function
+
+Private Sub ActualizarLRU_Paginacion(ByVal AccessedPage As Long)
+    Dim i As Long
+   
+    For i = 0 To NUM_PAGES - 1
+        If PageTable_ValidBit(i) Then
+            PageTable_LRU(i) = PageTable_LRU(i) + 1
+        End If
+    Next i
+    
+    PageTable_LRU(AccessedPage) = 0
+End Sub
+
+' --------------------------------------------------------------------
+' FUNCIONES DE I/O Y FETCH
+' --------------------------------------------------------------------
+
+Public Function IN_Dispositivo(ByVal Puerto As Integer) As Long
+    If Puerto = 1 Then
+        IN_Dispositivo = ThisWorkbook.Sheets(HojaNombre).Cells(3, COL_IO_PORT).Value
+    Else
+        IN_Dispositivo = 0
+    End If
+End Function
+
+Public Sub OUT_Dispositivo(ByVal Puerto As Integer, ByVal Valor As Long)
+    If Puerto = 2 Then
+        ThisWorkbook.Sheets(HojaNombre).Cells(4, COL_IO_PORT).Value = Valor
+    End If
+End Sub
+
+Public Function Leer_Instruccion(ByVal DireccionVirtual As Long) As String
+    Dim Valor As Long
+    Valor = Leer_Memoria(DireccionVirtual)
+    
+    Leer_Instruccion = CStr(Valor)
+End Function
