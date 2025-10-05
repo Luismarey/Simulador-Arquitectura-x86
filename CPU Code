@@ -1,0 +1,182 @@
+Option Explicit
+
+' Inicializa los registros y el Contador de Programa
+Public Sub InicializarCPU()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Hoja1")
+    
+    ' Poner registros en 0
+    ws.Range("C8").Value = 0   ' Registro1
+    ws.Range("G8").Value = 0   ' Registro2
+    ws.Range("E22").Value = 0  ' Acumulador
+    
+    ' Inicializar PC en fila 38
+    ws.Range("J8").Value = 38
+    
+    ' Limpiar resaltado de la columna G (instrucciones)
+    ws.Columns("G").Interior.ColorIndex = xlNone
+    
+    MsgBox "CPU inicializado correctamente. Listo para ejecutar instrucciones.", vbInformation
+End Sub
+
+    
+Public Sub LeerYResaltarInstruccion()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Hoja1")
+    
+    Dim PC As Long
+    PC = ws.Range("J8").Value
+    
+    Dim Instruccion As String
+    Instruccion = Trim(ws.Cells(PC, "G").Value)
+    
+    ' Verificar que haya instrucción
+    If Instruccion = "" Then
+        MsgBox "No hay instrucción en la fila " & PC, vbExclamation
+        Exit Sub
+    End If
+    
+    ' Limpiar colores anteriores
+    ws.Columns("G").Interior.ColorIndex = xlNone
+    
+    ' Resaltar la instrucción actual
+    ws.Cells(PC, "G").Interior.Color = vbYellow
+    
+    ' Mostrar mensaje con la instrucción
+    MsgBox "Instrucción actual (fila " & PC & "): " & Instruccion, vbInformation
+End Sub
+
+
+Public Sub EjecutarInstruccionPaso()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Hoja1")
+    
+    Dim PC As Long
+    PC = ws.Range("J8").Value
+    
+    Dim Instruccion As String
+    Instruccion = Trim(ws.Cells(PC, "G").Value)
+    
+    ' Verificar que haya instrucción
+    If Instruccion = "" Then
+        MsgBox "No hay instrucción en la fila " & PC, vbExclamation
+        Exit Sub
+    End If
+    
+    ' Resaltar la instrucción actual
+    ws.Columns("G").Interior.ColorIndex = xlNone
+    ws.Cells(PC, "G").Interior.Color = vbYellow
+    
+    ' --- Decodificar instrucción ---
+    Dim Partes() As String
+    Partes = Split(Instruccion, " ")
+    
+    Select Case LCase(Partes(0))
+        Case "mover"
+            If UBound(Partes) = 2 Then
+                Call EjecutarMover(ws, Partes(1), Partes(2))
+            Else
+                MsgBox "Instrucción MOVER mal escrita en fila " & PC, vbExclamation
+            End If
+        Case "sumar"
+            If UBound(Partes) = 2 Then
+                Call EjecutarSumar(ws, Partes(1), Partes(2))
+            Else
+                MsgBox "Instrucción SUMAR mal escrita en fila " & PC, vbExclamation
+            End If
+        Case Else
+            MsgBox "Instrucción desconocida: " & Instruccion, vbExclamation
+    End Select
+    
+    ' Incrementar PC
+    ws.Range("J8").Value = PC + 1
+End Sub
+
+Private Sub EjecutarMover(ws As Worksheet, Origen As String, Destino As String)
+    Dim Valor As Long
+    
+    ' --- Obtener el valor del ORIGEN ---
+    Select Case LCase(Origen)
+        Case "entrada1": Valor = ws.Range("C30").Value
+        Case "entrada2": Valor = ws.Range("C31").Value
+
+        Case "registro1": Valor = ws.Range("C8").Value
+        Case "registro2": Valor = ws.Range("G8").Value
+        Case "acumulador": Valor = ws.Range("E22").Value
+        Case Else
+            If Left(LCase(Origen), 3) = "mv[" Then
+                Dim dirOrigen As Long
+                dirOrigen = CLng(Replace(Replace(Origen, "MV[", ""), "]", ""))
+                Valor = Leer_Memoria(dirOrigen)
+            Else
+                MsgBox "Origen desconocido: " & Origen: Exit Sub
+            End If
+    End Select
+    
+    ' --- Guardar el valor en el DESTINO ---
+    Select Case LCase(Destino)
+        Case "registro1": ws.Range("C8").Value = Valor
+        Case "registro2": ws.Range("G8").Value = Valor
+        Case "acumulador": ws.Range("E22").Value = Valor
+        Case "salida1": ws.Range("D30").Value = Valor
+        Case "salida2": ws.Range("D31").Value = Valor
+
+        Case Else
+            If Left(LCase(Destino), 3) = "mv[" Then
+                Dim dirDestino As Long
+                dirDestino = CLng(Replace(Replace(Destino, "MV[", ""), "]", ""))
+                Call Escribir_Memoria(dirDestino, Valor)
+            Else
+                MsgBox "Destino desconocido: " & Destino
+            End If
+    End Select
+End Sub
+
+
+Private Sub EjecutarSumar(ws As Worksheet, Op1 As String, Op2 As String)
+    Dim V1 As Long, V2 As Long
+    V1 = ObtenerValor(ws, Op1)
+    V2 = ObtenerValor(ws, Op2)
+    ws.Range("E22").Value = V1 + V2
+End Sub
+
+Private Function ObtenerValor(ws As Worksheet, Nombre As String) As Long
+    Select Case LCase(Nombre)
+        Case "registro1": ObtenerValor = ws.Range("C8").Value
+        Case "registro2": ObtenerValor = ws.Range("G8").Value
+        Case "acumulador": ObtenerValor = ws.Range("E22").Value
+        Case "entrada1": ObtenerValor = ws.Range("C30").Value
+        Case "entrada2": ObtenerValor = ws.Range("C31").Value
+        Case Else: MsgBox "Operando desconocido: " & Nombre: ObtenerValor = 0
+    End Select
+End Function
+
+
+
+Public Sub EjecutarTodo()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("Hoja1")
+    
+    Do
+        Dim PC As Long: PC = ws.Range("J8").Value
+        Dim Instruccion As String
+        Instruccion = Trim(ws.Cells(PC, "G").Value)
+        
+        If Instruccion = "" Then
+            MsgBox "Ejecución finalizada. No hay más instrucciones.", vbInformation
+            Exit Sub
+        End If
+        
+        EjecutarInstruccionPaso
+        DoEvents ' Deja respirar a Excel
+    Loop
+End Sub
+
+Public Sub InicializarTodo()
+    Call InicializarCPU
+    Call Reset_Simulador
+    MsgBox "Simulador reiniciado completamente.", vbInformation
+End Sub
+
+
+
