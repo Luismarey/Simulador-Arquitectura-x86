@@ -1,0 +1,42 @@
+Private Sub EjecutarMover(ws As Worksheet, Origen As String, Destino As String)
+    Dim Valor As Long
+    Dim RangoOrigen As String, RangoDestino As String
+    
+    ' 1. Iluminar Origen (Visual)
+    RangoOrigen = ObtenerRango(ws, Origen)
+    If RangoOrigen <> "" Then ws.Range(RangoOrigen).Interior.Color = RGB(173, 216, 230)
+    
+    ' 2. OBTENER VALOR (Ahora usamos la función inteligente)
+    ' Esto automáticamente soporta MV[...], Registros y Números
+    Valor = ObtenerValor(ws, Origen)
+    
+    ' 3. Iluminar Destino (Visual)
+    RangoDestino = ObtenerRango(ws, Destino)
+    If RangoDestino <> "" Then ws.Range(RangoDestino).Interior.Color = vbYellow
+    
+    ' 4. Guardar Valor en Destino
+    Destino = LCase(Trim(Destino))
+    Select Case Destino
+        Case "registro1": ws.Range("C8").Value = Valor
+        Case "registro2": ws.Range("G8").Value = Valor
+        Case "acumulador": ws.Range("E22").Value = Valor
+        
+        Case "salida2"
+            Call OUT_Dispositivo(2, Valor)
+            
+        Case "salida1", "entrada1", "entrada2"
+             MsgBox "Error: Intentando escribir en un puerto de solo lectura o inválido.", vbCritical
+             
+        Case Else
+            ' Escritura en Memoria MV[xx]
+            If Left(Destino, 3) = "mv[" And Right(Destino, 1) = "]" Then
+                Dim dirDestino As String
+                dirDestino = Mid(Destino, 4, Len(Destino) - 4)
+                If IsNumeric(dirDestino) Then
+                    Call Escribir_Memoria(CLng(dirDestino), Valor)
+                End If
+            Else
+                MsgBox "Destino desconocido: " & Destino, vbCritical
+            End If
+    End Select
+End Sub
